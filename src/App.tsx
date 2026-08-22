@@ -30,6 +30,8 @@ export default function App() {
   const [secretKeyInput, setSecretKeyInput] = useState('');
   const [walletMessage, setWalletMessage] = useState('');
   const [walletBusy, setWalletBusy] = useState(false);
+  const [wallet, setWallet] = useState<any>(null);
+  const [walletError, setWalletError] = useState('');
   const [serverIp, setServerIp] = useState('Tespit ediliyor...');
   const [ipCopied, setIpCopied] = useState(false);
 
@@ -67,6 +69,29 @@ export default function App() {
     load();
     const id = setInterval(load, 1500);
     return () => clearInterval(id);
+  }, []);
+
+  // Private Binance endpoints are intentionally polled much less frequently than public market data.
+  // This prevents fetchBalance/fetchPositions from creating unnecessary REST pressure and 418 responses.
+  useEffect(() => {
+    let cancelled = false;
+    const refreshWallet = async () => {
+      try {
+        const r = await fetch('/api/v1/binance/wallet', { headers: authHeaders });
+        const j = await r.json().catch(() => ({}));
+        if (cancelled) return;
+        if (r.ok && j?.success) {
+          setWallet(j);
+          setWalletError('');
+        } else if (r.status !== 401) {
+          setWallet(null);
+          setWalletError(String(j?.message || j?.error || 'Cüzdan bilgisi alınamadı.'));
+        }
+      } catch {}
+    };
+    refreshWallet();
+    const id = setInterval(refreshWallet, 10000);
+    return () => { cancelled = true; clearInterval(id); };
   }, []);
 
   const command = async (path: string, body?: any) => {
@@ -132,16 +157,49 @@ export default function App() {
   };
 
   const saveBinanceKeys = async () => {
-    if (!apiKeyInput.trim() || !secretKeyInput.trim()) return;
-    setWalletBusy(true); setWalletMessage('Bağlanıyor…');
+    const apiKey = apiKeyInput.trim();
+    const secretKey = secretKeyInput.trim();
+    if (!apiKey || !secretKey) {
+      setWalletMessage('API Key ve Secret Key birlikte girilmeli.');
+      return;
+    }
+    setWalletBusy(true); setWalletMessage('Binance Futures doğrulanıyor…'); setWalletError('');
     try {
-      const r = await fetch('/api/v1/exchange-keys', { method:'POST', headers:{...authHeaders,'Content-Type':'application/json'}, body:JSON.stringify({apiKey:apiKeyInput.trim(), secretKey:secretKeyInput.trim()}) });
-      const j = await r.json();
-      setWalletMessage(j?.success ? `Binance Futures bağlı · ${Number(j.balance_usdt || 0).toFixed(2)} USDT` : `Hata: ${j?.message || j?.error || 'Bağlantı kurulamadı'}`);
-      if (j?.success) { setSecretKeyInput(''); await load(); }
-    } catch (e:any) { setWalletMessage(`Hata: ${e?.message || e}`); }
+      const r = await fetch('/api/v1/exchange-keys', {
+        method:'POST',
+        headers:{...authHeaders,'Content-Type':'application/json'},
+        body:JSON.stringify({apiKey, secretKey})
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j?.success) {
+        const msg = j?.message || j?.error || `Sunucu hatası (${r.status})`;
+        setWalletMessage(`Bağlantı başarısız: ${msg}`);
+        if (j?.server_ip) setWalletMessage(prev => `${prev} | Sunucu IP: ${j.server_ip}`);
+        return;
+      }
+      setWalletMessage(`✓ Binance Futures bağlı · ${Number(j.balance_usdt || 0).toFixed(2)} USDT`);
+      setSecretKeyInput('');
+      await load();
+    } catch (e:any) {
+      setWalletMessage(`Bağlantı hatası: ${e?.message || e}`);
+    } finally { setWalletBusy(false); }
+  };
+
+  const disconnectBinance = async () => {
+    if (walletBusy) return;
+    setWalletBusy(true); setWalletMessage('Bağlantı kesiliyor…');
+    try {
+      const r = await fetch('/api/v1/exchange-keys', {
+        method:'POST', headers:{...authHeaders,'Content-Type':'application/json'},
+        body:JSON.stringify({apiKey:'', secretKey:''})
+      });
+      const j = await r.json().catch(() => ({}));
+      setWalletMessage(j?.success ? 'Binance API bağlantısı kesildi.' : `İşlem başarısız: ${j?.message || j?.error || 'Bilinmeyen hata'}`);
+      if (j?.success) { setApiKeyInput(''); setSecretKeyInput(''); await load(); }
+    } catch (e:any) { setWalletMessage(`Bağlantı kesilemedi: ${e?.message || e}`); }
     finally { setWalletBusy(false); }
   };
+
 
   const analysis = book?.eightExchange || status?.eight_exchange;
   const liveMetrics = book?.metrics || status?.deep_analysis;
@@ -298,17 +356,46 @@ export default function App() {
           </section>;
         })()}
 
-        <section className="rounded-xl border border-[#202635] bg-[#10151e] p-4">
-          <button onClick={()=>setWalletOpen(v=>!v)} className="w-full flex items-center justify-between text-left">
-            <div><div className="text-xs uppercase tracking-wider text-slate-500">Binance Futures Cüzdan / İşlem API</div><div className="mt-1 text-lg font-bold">{status?.binance_account?.available_balance > 0 ? '● CANLI BAĞLANTI' : '○ API bağlantısı bekleniyor'}</div></div>
-            <span className="text-xs text-slate-500">{walletOpen ? 'Kapat' : 'Aç'}</span>
+        <section className="rounded-xl border border-[#202635] bg-[#10151e] p-3 sm:p-4">
+          <button onClick={()=>setWalletOpen(v=>!v)} className="w-full flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-left">
+            <div className="min-w-0">
+              <div className="text-[10px] sm:text-xs uppercase tracking-wider text-slate-500">Binance Futures Cüzdan / İşlem API</div>
+              <div className={`mt-1 text-base sm:text-lg font-bold ${wallet?.success ? 'text-emerald-400' : 'text-slate-200'}`}>
+                {wallet?.success ? '● CANLI BINANCE BAĞLANTISI' : '○ API bağlantısı bekleniyor'}
+              </div>
+            </div>
+            <span className="self-start sm:self-auto text-xs text-slate-500 rounded-md border border-[#293142] px-2 py-1">{walletOpen ? 'Kapat' : 'Aç / Bağla'}</span>
           </button>
-          {walletOpen && <div className="mt-4 grid md:grid-cols-3 gap-3">
-            <input value={apiKeyInput} onChange={e=>setApiKeyInput(e.target.value)} placeholder="Binance API Key" className="rounded-md border border-[#293142] bg-[#080b11] p-2 font-mono text-xs" autoComplete="off"/>
-            <input value={secretKeyInput} onChange={e=>setSecretKeyInput(e.target.value)} placeholder="Binance Secret Key" type="password" className="rounded-md border border-[#293142] bg-[#080b11] p-2 font-mono text-xs" autoComplete="off"/>
-            <button disabled={walletBusy} onClick={saveBinanceKeys} className="rounded-md bg-blue-600 px-3 py-2 text-sm disabled:opacity-50">{walletBusy ? 'Bağlanıyor…' : 'Binance Futures Bağla'}</button>
-            <div className="md:col-span-3 text-xs text-slate-500">API anahtarını yalnızca Futures işlem + USER_DATA için kullan; <b>withdrawal/çekim yetkisini kesinlikle açma</b>. Secret Key ekranda tekrar gösterilmez.</div>
-            {walletMessage && <div className="md:col-span-3 text-xs text-amber-300">{walletMessage}</div>}
+
+          {wallet?.success && (
+            <div className="mt-3 grid grid-cols-2 lg:grid-cols-5 gap-2 text-xs">
+              <div className="rounded-lg bg-[#0b0f16] p-3"><span className="text-slate-500">Wallet</span><br/><b>{fmt(wallet.wallet_balance_usdt,2)} USDT</b></div>
+              <div className="rounded-lg bg-[#0b0f16] p-3"><span className="text-slate-500">Margin</span><br/><b>{fmt(wallet.margin_balance_usdt,2)} USDT</b></div>
+              <div className="rounded-lg bg-[#0b0f16] p-3"><span className="text-slate-500">Available</span><br/><b>{fmt(wallet.available_balance_usdt,2)} USDT</b></div>
+              <div className="rounded-lg bg-[#0b0f16] p-3"><span className="text-slate-500">Used Margin</span><br/><b>{fmt(wallet.used_margin_usdt,2)} USDT</b></div>
+              <div className="rounded-lg bg-[#0b0f16] p-3"><span className="text-slate-500">Unrealized PNL</span><br/><b className={Number(wallet.unrealized_pnl_usdt)>=0?'text-emerald-400':'text-rose-400'}>{fmt(wallet.unrealized_pnl_usdt,2)} USDT</b></div>
+            </div>
+          )}
+
+          {walletOpen && <div className="mt-4 rounded-xl border border-[#293142] bg-[#0b0f16] p-3 sm:p-4">
+            <div className="grid grid-cols-1 lg:grid-cols-[1fr_1fr_auto_auto] gap-2">
+              <input value={apiKeyInput} onChange={e=>setApiKeyInput(e.target.value)} placeholder="Binance API Key" className="min-w-0 rounded-md border border-[#293142] bg-[#080b11] p-3 font-mono text-xs outline-none focus:border-blue-500" autoComplete="off" inputMode="text"/>
+              <input value={secretKeyInput} onChange={e=>setSecretKeyInput(e.target.value)} placeholder="Binance Secret Key" type="password" className="min-w-0 rounded-md border border-[#293142] bg-[#080b11] p-3 font-mono text-xs outline-none focus:border-blue-500" autoComplete="new-password"/>
+              <button disabled={walletBusy} onClick={saveBinanceKeys} className="rounded-md bg-blue-600 px-4 py-3 text-sm font-semibold disabled:opacity-50">{walletBusy ? 'İşleniyor…' : 'Bağla'}</button>
+              <button disabled={walletBusy || !wallet?.success} onClick={disconnectBinance} className="rounded-md border border-rose-500/40 px-4 py-3 text-sm text-rose-300 disabled:opacity-40">Kes</button>
+            </div>
+            <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2 text-[10px] sm:text-xs text-slate-500">
+              <div>API anahtarını yalnızca <b className="text-slate-300">Futures + USER_DATA</b> için kullan. <b className="text-rose-300">Withdrawal/çekim yetkisini açma.</b></div>
+              <div>Binance'in gördüğü outbound IP: <button type="button" onClick={copyServerIp} className="font-mono text-cyan-300 underline underline-offset-2">{serverIp}</button></div>
+            </div>
+            {walletMessage && <div className={`mt-3 rounded-md p-2 text-xs ${walletMessage.startsWith('✓') ? 'bg-emerald-500/10 text-emerald-300' : 'bg-amber-500/10 text-amber-300'}`}>{walletMessage}</div>}
+            {walletError && !wallet?.success && <div className="mt-2 rounded-md bg-rose-500/10 p-2 text-xs text-rose-300">{walletError}</div>}
+            {Array.isArray(wallet?.positions) && wallet.positions.length > 0 && (
+              <div className="mt-3 overflow-x-auto">
+                <div className="mb-2 text-[10px] uppercase tracking-wider text-slate-500">Binance Açık Pozisyonlar</div>
+                <table className="min-w-[620px] w-full text-xs"><thead className="text-slate-500"><tr><th className="p-2 text-left">Symbol</th><th className="p-2 text-right">Qty</th><th className="p-2 text-right">Entry</th><th className="p-2 text-right">Mark</th><th className="p-2 text-right">PNL</th><th className="p-2 text-right">Lev.</th></tr></thead><tbody>{wallet.positions.map((pos:any)=><tr key={`${pos.symbol}-${pos.side}`} className="border-t border-[#1b2230]"><td className="p-2 font-semibold">{pos.symbol} · {String(pos.side||'').toUpperCase()}</td><td className="p-2 text-right font-mono">{fmt(pos.contracts,4)}</td><td className="p-2 text-right font-mono">{fmt(pos.entry_price,4)}</td><td className="p-2 text-right font-mono">{fmt(pos.mark_price,4)}</td><td className={`p-2 text-right font-mono ${Number(pos.unrealized_pnl)>=0?'text-emerald-400':'text-rose-400'}`}>{fmt(pos.unrealized_pnl,2)}</td><td className="p-2 text-right">{fmt(pos.leverage,0)}x</td></tr>)}</tbody></table>
+              </div>
+            )}
           </div>}
         </section>
 
