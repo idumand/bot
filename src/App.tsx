@@ -8,7 +8,7 @@ type ExchangeRow = {
   exchange: string; mid: number; bestBid: number; bestAsk: number; obi: number; ageMs: number;
 };
 
-export default function App() {
+export function App() {
   const [status, setStatus] = useState<any>(null);
   const [book, setBook] = useState<any>(null);
   const [trades, setTrades] = useState<any[]>([]);
@@ -373,3 +373,6 @@ export default function App() {
     </div>
   );
 }
+
+
+export default App;
